@@ -40,7 +40,7 @@ def handle_qr_photo(message):
     try:
         # Получаем прямую ссылку на фото из Telegram (Строка 42-43)
         file_info = bot.get_file(message.photo[-1].file_id)
-        file_url = f"https://api.telegram.org{BOT_TOKEN}/{file_info.file_path}"
+        file_url = f"https://telegram.org{BOT_TOKEN}/{file_info.file_path}"
         
         # Отправляем фото в бесплатное онлайн-API для чтения QR (Строка 45-47)
         api_url = f"https://qrserver.com{file_url}"
