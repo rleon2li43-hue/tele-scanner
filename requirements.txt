@@ -2,5 +2,3 @@ pyTelegramBotAPI
 gspread
 oauth2client
 requests
-Pillow
-pyzbar-x
