@@ -4,8 +4,8 @@ import telebot
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import requests
-# Используем новую библиотеку, которой не нужны системные файлы Linux
-from pure_barcodes import decode_qrcode
+from PIL import Image
+from pyzbar.pyzbar import decode
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 GOOGLE_CREDS_TEXT = os.environ.get("GOOGLE_CREDS")
@@ -48,16 +48,16 @@ def handle_qr_photo(message):
         with open(image_path, 'wb') as f:
             f.write(downloaded_file)
 
-        # Распознаем QR-код новым безопасным способом
-        try:
-            qr_text = decode_qrcode(image_path)
-        except Exception:
-            raise Exception("Не удалось обнаружить QR-код. Сделайте фото ближе, ровнее и четче.")
+        # Распознаем QR-код с помощью стабильной библиотеки
+        img = Image.open(image_path)
+        decoded_objects = decode(img)
 
-        if not qr_text:
-            raise Exception("QR-код на фото пустой или размыт.")
+        if not decoded_objects:
+            raise Exception("Не удалось обнаружить QR-код. Сделайте фото ближе и четче.")
 
-        # Парсим параметры чека
+        qr_text = decoded_objects[0].data.decode('utf-8')
+        
+        # Разбираем параметры строки чека
         params = dict(x.split('=') for x in qr_text.split('&'))
         raw_date = params.get('t', 'Неизвестно')
         total_sum = params.get('s', '0')
@@ -68,7 +68,7 @@ def handle_qr_photo(message):
         else:
             date_formatted = raw_date
 
-        # Записываем в таблицу
+        # Записываем данные в Google Таблицу
         SHEET.append_row([date_formatted, account, float(total_sum), qr_text])
         bot.send_message(chat_id, f"✅ Данные внесены!\n📅 Дата: {date_formatted}\n💳 Счет: {account}\n💰 Сумма: {total_sum} руб.")
         
