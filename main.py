@@ -4,8 +4,6 @@ import telebot
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import requests
-from PIL import Image
-from pyzbar.pyzbar import decode
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 GOOGLE_CREDS_TEXT = os.environ.get("GOOGLE_CREDS")
@@ -40,24 +38,21 @@ def handle_qr_photo(message):
     bot.send_message(chat_id, "Загружаю и анализирую фото...")
 
     try:
-        # Скачиваем фото из Telegram
+        # 1. Получаем прямую ссылку на фото из Telegram
         file_info = bot.get_file(message.photo[-1].file_id)
-        downloaded_file = bot.download_file(file_info.file_path)
+        file_url = f"https://telegram.org{BOT_TOKEN}/{file_info.file_path}"
         
-        image_path = f"qr_{chat_id}.jpg"
-        with open(image_path, 'wb') as f:
-            f.write(downloaded_file)
-
-        # Распознаем QR-код с помощью стабильной библиотеки
-        img = Image.open(image_path)
-        decoded_objects = decode(img)
-
-        if not decoded_objects:
-            raise Exception("Не удалось обнаружить QR-код. Сделайте фото ближе и четче.")
-
-        qr_text = decoded_objects[0].data.decode('utf-8')
+        # 2. Отправляем ссылку на фото в бесплатное и надежное API для чтения QR-кодов
+        api_url = f"https://qrserver.com{file_url}"
+        response = requests.get(api_url).json()
         
-        # Разбираем параметры строки чека
+        # Вытаскиваем текст из ответа API
+        qr_text = response[0]['symbol'][0]['data']
+        
+        if not qr_text:
+            raise Exception("Не удалось обнаружить QR-код на фото. Пожалуйста, сделайте более четкий снимок крупным планом.")
+
+        # 3. Разбираем параметры строки чека
         params = dict(x.split('=') for x in qr_text.split('&'))
         raw_date = params.get('t', 'Неизвестно')
         total_sum = params.get('s', '0')
@@ -68,18 +63,14 @@ def handle_qr_photo(message):
         else:
             date_formatted = raw_date
 
-        # Записываем данные в Google Таблицу
+        # 4. Записываем данные в Google Таблицу
         SHEET.append_row([date_formatted, account, float(total_sum), qr_text])
         bot.send_message(chat_id, f"✅ Данные внесены!\n📅 Дата: {date_formatted}\n💳 Счет: {account}\n💰 Сумма: {total_sum} руб.")
         
-        if os.path.exists(image_path):
-            os.remove(image_path)
         del user_data[chat_id]
 
     except Exception as e:
         bot.send_message(chat_id, f"❌ Ошибка обработки: {str(e)}")
-        if os.path.exists(image_path):
-            os.remove(image_path)
 
 if __name__ == "__main__":
     bot.polling(none_stop=True)
