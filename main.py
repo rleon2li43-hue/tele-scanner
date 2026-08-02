@@ -55,16 +55,51 @@ accounts_keyboard = ReplyKeyboardMarkup(
 class Receipt(StatesGroup):
     waiting_for_account = State()
 
-def parse_receipt_json(data):
+def find_items(data):
+    """
+    Рекурсивно ищет список товаров в любом уровне вложенности.
+    Возвращает список позиций, если найден ключ 'items', содержащий список.
+    """
     if isinstance(data, list):
-        raw_items = data
+        for item in data:
+            res = find_items(item)
+            if res:
+                return res
     elif isinstance(data, dict):
-        raw_items = data.get("items", [])
-    else:
-        return []
+        if "items" in data and isinstance(data["items"], list):
+            return data["items"]
+        for value in data.values():
+            res = find_items(value)
+            if res:
+                return res
+    return []
 
+def find_date(data):
+    """
+    Рекурсивно ищет строку с датой (ключ 'dateTime' или 'date') во вложенных объектах.
+    Возвращает строку или None.
+    """
+    if isinstance(data, list):
+        for item in data:
+            d = find_date(item)
+            if d:
+                return d
+    elif isinstance(data, dict):
+        for key in ("dateTime", "date"):
+            if key in data:
+                return data[key]
+        for value in data.values():
+            d = find_date(value)
+            if d:
+                return d
+    return None
+
+def parse_receipt_json(data):
+    items_raw = find_items(data)
+    if not items_raw:
+        return []
     items = []
-    for item in raw_items:
+    for item in items_raw:
         name = item.get("name") or item.get("Наименование") or item.get("название", "")
         price = float(item.get("price", 0) or item.get("Цена", 0))
         quantity = float(item.get("quantity", 1) or item.get("Количество", 1))
@@ -117,9 +152,20 @@ async def handle_json_file(message: Message, state: FSMContext):
 
     items = parse_receipt_json(data)
     if not items:
-        return await message.answer("❌ В чеке не найдено позиций.")
+        return await message.answer("❌ В чеке не найдено позиций. Проверьте структуру JSON.")
 
-    date_str = data.get("dateTime") if isinstance(data, dict) else datetime.now().strftime("%Y-%m-%d")
+    # Пробуем найти дату внутри JSON, иначе берём сегодняшнюю
+    date_str = find_date(data)
+    if not date_str:
+        date_str = datetime.now().strftime("%Y-%m-%d")
+    else:
+        # Приводим к короткому виду (если дата с временем)
+        try:
+            dt = datetime.fromisoformat(date_str.replace("Z", "+00:00").replace("+00:00", ""))
+            date_str = dt.strftime("%Y-%m-%d")
+        except:
+            pass
+
     await state.update_data(items=items, date_str=date_str)
     await message.answer(
         f"📋 Чек от {date_str}, позиций: {len(items)}.\nВыберите категорию:",
