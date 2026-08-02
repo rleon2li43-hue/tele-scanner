@@ -1,20 +1,20 @@
 import os
-import json
 import telebot
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
 import requests
 
+# Теперь и токен бота, и ссылка на таблицу полностью скрыты в секретах Amvera
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-GOOGLE_CREDS_TEXT = os.environ.get("GOOGLE_CREDS")
+SHEET_URL = os.environ.get("SHEET_URL")
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-SCOPE = ["https://google.com", "https://googleapis.com"]
-creds_dict = json.loads(GOOGLE_CREDS_TEXT)
-CREDS = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, SCOPE)
-CLIENT = gspread.authorize(CREDS)
-SHEET = CLIENT.open("Мои Расходы").sheet1 
+# Подключаемся к таблице напрямую по публичной ссылке из переменной окружения
+try:
+    gc = gspread.public()
+    SHEET = gc.open_by_url(SHEET_URL).sheet1
+except Exception as e:
+    print(f"Ошибка подключения к таблице: {e}")
 
 user_data = {}
 
@@ -38,21 +38,24 @@ def handle_qr_photo(message):
     bot.send_message(chat_id, "Загружаю и анализирую фото...")
 
     try:
-        # 1. Получаем прямую ссылку на фото из Telegram
+        # Получаем прямую ссылку на фото из Telegram
         file_info = bot.get_file(message.photo[-1].file_id)
         file_url = f"https://telegram.org{BOT_TOKEN}/{file_info.file_path}"
         
-        # 2. Отправляем ссылку на фото в бесплатное и надежное API для чтения QR-кодов
+        # Отправляем фото в бесплатное онлайн-API для чтения QR
         api_url = f"https://qrserver.com{file_url}"
         response = requests.get(api_url).json()
         
-        # Вытаскиваем текст из ответа API
+        # Защита от сбоя ответа сервера
+        if not response or not isinstance(response, list) or len(response) == 0:
+            raise Exception("Не удалось связаться с сервером распознавания.")
+            
         qr_text = response[0]['symbol'][0]['data']
         
         if not qr_text:
             raise Exception("Не удалось обнаружить QR-код на фото. Пожалуйста, сделайте более четкий снимок крупным планом.")
 
-        # 3. Разбираем параметры строки чека
+        # Разбираем параметры строки чека
         params = dict(x.split('=') for x in qr_text.split('&'))
         raw_date = params.get('t', 'Неизвестно')
         total_sum = params.get('s', '0')
@@ -63,7 +66,7 @@ def handle_qr_photo(message):
         else:
             date_formatted = raw_date
 
-        # 4. Записываем данные в Google Таблицу
+        # Записываем данные в Google Таблицу по ссылке
         SHEET.append_row([date_formatted, account, float(total_sum), qr_text])
         bot.send_message(chat_id, f"✅ Данные внесены!\n📅 Дата: {date_formatted}\n💳 Счет: {account}\n💰 Сумма: {total_sum} руб.")
         
