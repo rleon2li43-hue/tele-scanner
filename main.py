@@ -15,27 +15,18 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.client.session.aiohttp import AiohttpSession
 
-# --- Логирование ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Переменные окружения ---
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_API_TOKEN")
 GOOGLE_SHEET_URL = os.getenv("GOOGLE_SHEET_URL")
 GOOGLE_CREDENTIALS_BASE64 = os.getenv("GOOGLE_CREDENTIALS_BASE64")
 
-if not TELEGRAM_TOKEN or not GOOGLE_SHEET_URL or not GOOGLE_CREDENTIALS_BASE64:
-    raise EnvironmentError("Не заданы TELEGRAM_API_TOKEN, GOOGLE_SHEET_URL или GOOGLE_CREDENTIALS_BASE64")
-
-# --- Создаём сессию с увеличенным таймаутом (60 секунд) ---
 session = AiohttpSession(timeout=60)
-
-# --- Инициализация бота с этой сессией ---
 bot = Bot(token=TELEGRAM_TOKEN, session=session)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-# --- Google Sheets ---
 def get_gspread_client():
     decoded_bytes = base64.b64decode(GOOGLE_CREDENTIALS_BASE64)
     creds_dict = json.loads(decoded_bytes.decode("utf-8"))
@@ -50,7 +41,6 @@ except:
     ws_items = sh.add_worksheet(title="Позиции", rows="1000", cols="10")
     ws_items.append_row(["Дата", "Счёт", "Товар", "Цена", "Количество", "Сумма"])
 
-# --- Категории (счета) ---
 ACCOUNTS = [
     "🥦 Продукты", "🚌 Транспорт", "🍔 Кафе", "🎉 Развлечения",
     "🏠 ЖКХ", "💊 Здоровье", "📚 Образование", "🛒 Прочее"
@@ -62,26 +52,32 @@ accounts_keyboard = ReplyKeyboardMarkup(
     one_time_keyboard=True
 )
 
-# --- Состояния ---
 class Receipt(StatesGroup):
     waiting_for_account = State()
 
-# --- Парсинг JSON чека ---
-def parse_receipt_json(data: dict) -> list[dict]:
-    items = data.get("items", [])
-    if not items:
+def parse_receipt_json(data):
+    if isinstance(data, list):
+        raw_items = data
+    elif isinstance(data, dict):
+        raw_items = data.get("items", [])
+    else:
         return []
-    result = []
-    for item in items:
-        result.append({
-            "name": item.get("name", "").strip(),
-            "price": float(item.get("price", 0)),
-            "quantity": float(item.get("quantity", 1)),
-            "sum": float(item.get("sum", 0))
-        })
-    return result
 
-def write_items_to_sheet(date_str: str, account: str, items: list[dict]):
+    items = []
+    for item in raw_items:
+        name = item.get("name") or item.get("Наименование") or item.get("название", "")
+        price = float(item.get("price", 0) or item.get("Цена", 0))
+        quantity = float(item.get("quantity", 1) or item.get("Количество", 1))
+        summ = float(item.get("sum", 0) or item.get("Сумма", 0) or item.get("стоимость", 0))
+        items.append({
+            "name": str(name).strip(),
+            "price": price,
+            "quantity": quantity,
+            "sum": summ
+        })
+    return items
+
+def write_items_to_sheet(date_str, account, items):
     for item in items:
         ws_items.append_row([
             date_str,
@@ -93,12 +89,11 @@ def write_items_to_sheet(date_str: str, account: str, items: list[dict]):
         ])
     logger.info(f"Добавлено {len(items)} позиций в категорию '{account}'")
 
-# --- Команды ---
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     await message.answer(
         "👋 Привет! Я бот для учёта чеков.\n"
-        "Отправьте мне JSON-файл из приложения «Проверка чека» (или другого), "
+        "Отправьте мне JSON-файл из приложения «Проверка чека», "
         "и я разложу все позиции по вашей Google Таблице.\n"
         "Перед сохранением спрошу категорию (счёт)."
     )
@@ -122,9 +117,9 @@ async def handle_json_file(message: Message, state: FSMContext):
 
     items = parse_receipt_json(data)
     if not items:
-        return await message.answer("❌ В чеке не найдено позиций (поле 'items').")
+        return await message.answer("❌ В чеке не найдено позиций.")
 
-    date_str = data.get("dateTime") or data.get("date") or datetime.now().strftime("%Y-%m-%d")
+    date_str = data.get("dateTime") if isinstance(data, dict) else datetime.now().strftime("%Y-%m-%d")
     await state.update_data(items=items, date_str=date_str)
     await message.answer(
         f"📋 Чек от {date_str}, позиций: {len(items)}.\nВыберите категорию:",
@@ -154,7 +149,6 @@ async def process_account(message: Message, state: FSMContext):
 
     await state.clear()
 
-# --- Запуск ---
 async def main():
     logger.info("Бот запущен (JSON-режим)...")
     await dp.start_polling(bot)
