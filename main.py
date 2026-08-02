@@ -13,6 +13,7 @@ from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.client.session.aiohttp import AiohttpSession
 
 # --- Логирование ---
 logging.basicConfig(level=logging.INFO)
@@ -26,8 +27,11 @@ GOOGLE_CREDENTIALS_BASE64 = os.getenv("GOOGLE_CREDENTIALS_BASE64")
 if not TELEGRAM_TOKEN or not GOOGLE_SHEET_URL or not GOOGLE_CREDENTIALS_BASE64:
     raise EnvironmentError("Не заданы TELEGRAM_API_TOKEN, GOOGLE_SHEET_URL или GOOGLE_CREDENTIALS_BASE64")
 
-# --- Инициализация бота ---
-bot = Bot(token=TELEGRAM_TOKEN)
+# --- Создаём сессию с увеличенным таймаутом (60 секунд) ---
+session = AiohttpSession(timeout=60)
+
+# --- Инициализация бота с этой сессией ---
+bot = Bot(token=TELEGRAM_TOKEN, session=session)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
@@ -40,7 +44,6 @@ def get_gspread_client():
 gc = get_gspread_client()
 sh = gc.open_by_url(GOOGLE_SHEET_URL)
 
-# Открываем или создаём лист "Позиции"
 try:
     ws_items = sh.worksheet("Позиции")
 except:
@@ -63,13 +66,8 @@ accounts_keyboard = ReplyKeyboardMarkup(
 class Receipt(StatesGroup):
     waiting_for_account = State()
 
-# --- Вспомогательные функции ---
+# --- Парсинг JSON чека ---
 def parse_receipt_json(data: dict) -> list[dict]:
-    """
-    Из JSON чека извлекает список позиций.
-    Ожидаемая структура: { "items": [ { "name": ..., "price": ..., "quantity": ..., "sum": ... }, ... ] }
-    Возвращает список словарей с ключами name, price, quantity, sum.
-    """
     items = data.get("items", [])
     if not items:
         return []
@@ -84,7 +82,6 @@ def parse_receipt_json(data: dict) -> list[dict]:
     return result
 
 def write_items_to_sheet(date_str: str, account: str, items: list[dict]):
-    """Записывает позиции в лист Позиции."""
     for item in items:
         ws_items.append_row([
             date_str,
@@ -96,7 +93,7 @@ def write_items_to_sheet(date_str: str, account: str, items: list[dict]):
         ])
     logger.info(f"Добавлено {len(items)} позиций в категорию '{account}'")
 
-# --- Обработчики ---
+# --- Команды ---
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     await message.answer(
@@ -109,12 +106,10 @@ async def cmd_start(message: Message):
 @dp.message(F.document)
 async def handle_json_file(message: Message, state: FSMContext):
     doc = message.document
-    # Проверяем, что это JSON
     if not (doc.file_name and doc.file_name.lower().endswith(".json")) and \
        not (doc.mime_type and "json" in doc.mime_type):
         return await message.answer("⚠️ Я принимаю только JSON-файлы с чеками.")
 
-    # Скачиваем и парсим
     try:
         file = await bot.get_file(doc.file_id)
         file_bytes = BytesIO()
@@ -125,15 +120,11 @@ async def handle_json_file(message: Message, state: FSMContext):
         logger.error(f"Ошибка чтения JSON: {e}")
         return await message.answer("❌ Не удалось прочитать JSON-файл. Проверьте формат.")
 
-    # Извлекаем позиции
     items = parse_receipt_json(data)
     if not items:
         return await message.answer("❌ В чеке не найдено позиций (поле 'items').")
 
-    # Дата (из JSON или сегодня)
     date_str = data.get("dateTime") or data.get("date") or datetime.now().strftime("%Y-%m-%d")
-
-    # Сохраняем в состоянии
     await state.update_data(items=items, date_str=date_str)
     await message.answer(
         f"📋 Чек от {date_str}, позиций: {len(items)}.\nВыберите категорию:",
@@ -144,7 +135,6 @@ async def handle_json_file(message: Message, state: FSMContext):
 @dp.message(Receipt.waiting_for_account)
 async def process_account(message: Message, state: FSMContext):
     account = message.text
-    # Убираем emoji для чистоты названия счёта (опционально)
     for emoji in ["🥦 ", "🚌 ", "🍔 ", "🎉 ", "🏠 ", "💊 ", "📚 ", "🛒 "]:
         account = account.replace(emoji, "")
 
