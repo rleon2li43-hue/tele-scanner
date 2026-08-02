@@ -17,7 +17,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ====== Переменные окружения (настраиваются в Amvera) ======
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_API_TOKEN")          # токен бота
+TELEGRAM_TOKEN = os.getenv("BOT_TOKEN")          # токен бота
 GOOGLE_SHEET_URL = os.getenv("GOOGLE_SHEET_URL")          # ссылка на таблицу
 GOOGLE_CREDENTIALS_BASE64 = os.getenv("GOOGLE_CREDENTIALS_BASE64")  # JSON-ключ в Base64
 
