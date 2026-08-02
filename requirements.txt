@@ -2,4 +2,5 @@ pyTelegramBotAPI
 gspread
 oauth2client
 requests
-pure_barcodes
+Pillow
+pyzbar-x
