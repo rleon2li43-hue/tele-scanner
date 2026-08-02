@@ -7,14 +7,11 @@ from pyzbar.pyzbar import decode
 import os
 import json
 
-# Токен вашего бота из @BotFather
-BOT_TOKEN = "ВАШ_ТОКЕН_БОТА"
-bot = telebot.TeleBot(BOT_TOKEN)
+# Теперь бот не хранит пароли в коде, а берет их из скрытых настроек сервера Amvera
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+GOOGLE_CREDS_TEXT = os.environ.get("GOOGLE_CREDS")
 
-# Данные вашего credentials.json из Google Cloud в виде текста (чтобы не возиться с файлами)
-GOOGLE_CREDS_TEXT = """
-ВСТАВЬТЕ_СЮДА_ВЕСЬ_ТЕКСТ_ИЗ_ФАЙЛА_CREDENTIALS_JSON
-"""
+bot = telebot.TeleBot(BOT_TOKEN)
 
 # Настройка Google Таблиц
 SCOPE = ["https://google.com", "https://googleapis.com"]
