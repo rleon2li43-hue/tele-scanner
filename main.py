@@ -56,10 +56,7 @@ class Receipt(StatesGroup):
     waiting_for_account = State()
 
 def find_items(data):
-    """
-    Рекурсивно ищет список товаров в любом уровне вложенности.
-    Возвращает список позиций, если найден ключ 'items', содержащий список.
-    """
+    """Рекурсивно ищет массив товаров (ключ 'items') во вложенном JSON."""
     if isinstance(data, list):
         for item in data:
             res = find_items(item)
@@ -75,10 +72,7 @@ def find_items(data):
     return []
 
 def find_date(data):
-    """
-    Рекурсивно ищет строку с датой (ключ 'dateTime' или 'date') во вложенных объектах.
-    Возвращает строку или None.
-    """
+    """Рекурсивно ищет дату (dateTime или date) во вложенном JSON."""
     if isinstance(data, list):
         for item in data:
             d = find_date(item)
@@ -101,14 +95,15 @@ def parse_receipt_json(data):
     items = []
     for item in items_raw:
         name = item.get("name") or item.get("Наименование") or item.get("название", "")
-        price = float(item.get("price", 0) or item.get("Цена", 0))
-        quantity = float(item.get("quantity", 1) or item.get("Количество", 1))
-        summ = float(item.get("sum", 0) or item.get("Сумма", 0) or item.get("стоимость", 0))
+        # Цены в копейках — переводим в рубли
+        price = float(item.get("price", 0)) / 100
+        quantity = float(item.get("quantity", 1))
+        summ = float(item.get("sum", 0)) / 100
         items.append({
             "name": str(name).strip(),
-            "price": price,
+            "price": round(price, 2),
             "quantity": quantity,
-            "sum": summ
+            "sum": round(summ, 2)
         })
     return items
 
@@ -154,17 +149,17 @@ async def handle_json_file(message: Message, state: FSMContext):
     if not items:
         return await message.answer("❌ В чеке не найдено позиций. Проверьте структуру JSON.")
 
-    # Пробуем найти дату внутри JSON, иначе берём сегодняшнюю
-    date_str = find_date(data)
-    if not date_str:
-        date_str = datetime.now().strftime("%Y-%m-%d")
-    else:
-        # Приводим к короткому виду (если дата с временем)
+    # Ищем дату и приводим к формату ДД.ММ.ГГГГ
+    raw_date = find_date(data)
+    if raw_date:
         try:
-            dt = datetime.fromisoformat(date_str.replace("Z", "+00:00").replace("+00:00", ""))
-            date_str = dt.strftime("%Y-%m-%d")
+            # Формат может быть "2026-07-17T19:59:00" или с +00:00
+            dt = datetime.fromisoformat(raw_date.replace("Z", "+00:00").split("+")[0])
+            date_str = dt.strftime("%d.%m.%Y")
         except:
-            pass
+            date_str = datetime.now().strftime("%d.%m.%Y")
+    else:
+        date_str = datetime.now().strftime("%d.%m.%Y")
 
     await state.update_data(items=items, date_str=date_str)
     await message.answer(
@@ -181,7 +176,7 @@ async def process_account(message: Message, state: FSMContext):
 
     data = await state.get_data()
     items = data.get("items", [])
-    date_str = data.get("date_str", datetime.now().strftime("%Y-%m-%d"))
+    date_str = data.get("date_str", datetime.now().strftime("%d.%m.%Y"))
 
     try:
         write_items_to_sheet(date_str, account, items)
