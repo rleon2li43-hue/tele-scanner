@@ -38,25 +38,19 @@ def handle_qr_photo(message):
     bot.send_message(chat_id, "Загружаю и анализирую фото...")
 
     try:
-        # 1. Скачиваем фото из Telegram в память сервера Amvera
+        # Получаем прямую ссылку на фото из Telegram (Строка 42-43)
         file_info = bot.get_file(message.photo[-1].file_id)
-        downloaded_file = bot.download_file(file_info.file_path)
+        file_url = f"https://api.telegram.org{BOT_TOKEN}/{file_info.file_path}"
         
-        # 2. Сохраняем как временный файл
-        image_path = f"temp_{chat_id}.jpg"
-        with open(image_path, 'wb') as f:
-            f.write(downloaded_file)
+        # Отправляем фото в бесплатное онлайн-API для чтения QR (Строка 45-47)
+        api_url = f"https://qrserver.com{file_url}"
+        response = requests.get(api_url).json()
+        
+        # Защита от сбоя ответа сервера (Строка 49-50)
+        if not response or not isinstance(response, list):
+            raise Exception("Не удалось связаться с сервером распознавания.")
             
-        # 3. Отправляем сам файл (а не ссылку!) на сервер распознавания
-        api_url = "https://qrserver.com"
-        with open(image_path, 'rb') as f:
-            response = requests.post(api_url, files={'file': f}).json()
-            
-        # 4. Удаляем временный файл с сервера, чтобы не забивать память
-        if os.path.exists(image_path):
-            os.remove(image_path)
-            
-        # 5. Читаем текст из ответа сервера
+        # Читаем текст из правильной структуры ответа API (Строка 52-53)
         qr_text = response[0]['symbol'][0]['data']
 
         
