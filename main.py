@@ -4,186 +4,169 @@ import base64
 import logging
 import asyncio
 from io import BytesIO
+from datetime import datetime
 
-import cv2
-import numpy as np
 import gspread
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
 
-# ====== Логирование ======
+# --- Логирование ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ====== Переменные окружения (настраиваются в Amvera) ======
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_API_TOKEN")          # токен бота
-GOOGLE_SHEET_URL = os.getenv("GOOGLE_SHEET_URL")          # ссылка на таблицу
-GOOGLE_CREDENTIALS_BASE64 = os.getenv("GOOGLE_CREDENTIALS_BASE64")  # JSON-ключ в Base64
+# --- Переменные окружения ---
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_API_TOKEN")
+GOOGLE_SHEET_URL = os.getenv("GOOGLE_SHEET_URL")
+GOOGLE_CREDENTIALS_BASE64 = os.getenv("GOOGLE_CREDENTIALS_BASE64")
 
 if not TELEGRAM_TOKEN or not GOOGLE_SHEET_URL or not GOOGLE_CREDENTIALS_BASE64:
-    raise EnvironmentError(
-        "Не заданы TELEGRAM_API_TOKEN, GOOGLE_SHEET_URL или GOOGLE_CREDENTIALS_BASE64"
-    )
+    raise EnvironmentError("Не заданы TELEGRAM_API_TOKEN, GOOGLE_SHEET_URL или GOOGLE_CREDENTIALS_BASE64")
 
-# ====== Инициализация бота ======
+# --- Инициализация бота ---
 bot = Bot(token=TELEGRAM_TOKEN)
-dp = Dispatcher()
+storage = MemoryStorage()
+dp = Dispatcher(storage=storage)
 
-# ====== Настройка Google Sheets ======
+# --- Google Sheets ---
 def get_gspread_client():
-    """Декодирует Base64-ключ и создаёт клиент gspread."""
-    try:
-        # Декодируем Base64 -> байты -> строка JSON
-        decoded_bytes = base64.b64decode(GOOGLE_CREDENTIALS_BASE64)
-        creds_json = decoded_bytes.decode("utf-8")
-        creds_dict = json.loads(creds_json)
-        return gspread.service_account_from_dict(creds_dict)
-    except Exception as e:
-        logger.error(f"Ошибка инициализации Google Sheets: {e}")
-        raise
+    decoded_bytes = base64.b64decode(GOOGLE_CREDENTIALS_BASE64)
+    creds_dict = json.loads(decoded_bytes.decode("utf-8"))
+    return gspread.service_account_from_dict(creds_dict)
 
 gc = get_gspread_client()
-sheet = gc.open_by_url(GOOGLE_SHEET_URL).sheet1  # первый лист
+sh = gc.open_by_url(GOOGLE_SHEET_URL)
 
-# ====== Распознавание QR-кода ======
-def decode_qr(image_bytes: bytes) -> str | None:
+# Открываем или создаём лист "Позиции"
+try:
+    ws_items = sh.worksheet("Позиции")
+except:
+    ws_items = sh.add_worksheet(title="Позиции", rows="1000", cols="10")
+    ws_items.append_row(["Дата", "Счёт", "Товар", "Цена", "Количество", "Сумма"])
+
+# --- Категории (счета) ---
+ACCOUNTS = [
+    "🥦 Продукты", "🚌 Транспорт", "🍔 Кафе", "🎉 Развлечения",
+    "🏠 ЖКХ", "💊 Здоровье", "📚 Образование", "🛒 Прочее"
+]
+
+accounts_keyboard = ReplyKeyboardMarkup(
+    keyboard=[[KeyboardButton(text=acc)] for acc in ACCOUNTS],
+    resize_keyboard=True,
+    one_time_keyboard=True
+)
+
+# --- Состояния ---
+class Receipt(StatesGroup):
+    waiting_for_account = State()
+
+# --- Вспомогательные функции ---
+def parse_receipt_json(data: dict) -> list[dict]:
     """
-    Декодирует QR-код из изображения (байты).
-    Возвращает строку данных или None, если QR не найден.
+    Из JSON чека извлекает список позиций.
+    Ожидаемая структура: { "items": [ { "name": ..., "price": ..., "quantity": ..., "sum": ... }, ... ] }
+    Возвращает список словарей с ключами name, price, quantity, sum.
     """
-    try:
-        nparr = np.frombuffer(image_bytes, np.uint8)
-        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        if img is None:
-            return None
+    items = data.get("items", [])
+    if not items:
+        return []
+    result = []
+    for item in items:
+        result.append({
+            "name": item.get("name", "").strip(),
+            "price": float(item.get("price", 0)),
+            "quantity": float(item.get("quantity", 1)),
+            "sum": float(item.get("sum", 0))
+        })
+    return result
 
-        detector = cv2.QRCodeDetector()
-        data, bbox, _ = detector.detectAndDecode(img)
-        if data:
-            return data.strip()
-        return None
-    except Exception as e:
-        logger.error(f"Ошибка при декодировании QR: {e}")
-        return None
+def write_items_to_sheet(date_str: str, account: str, items: list[dict]):
+    """Записывает позиции в лист Позиции."""
+    for item in items:
+        ws_items.append_row([
+            date_str,
+            account,
+            item["name"],
+            item["price"],
+            item["quantity"],
+            item["sum"]
+        ])
+    logger.info(f"Добавлено {len(items)} позиций в категорию '{account}'")
 
-# ====== Парсинг типового фискального чека ======
-def parse_receipt_qr(qr_text: str) -> dict:
-    """
-    Если QR содержит параметры вида t=...&s=...&fn=...,
-    возвращает словарь с полями. Иначе – сырой текст.
-    """
-    if "=" in qr_text and "&" in qr_text:
-        try:
-            params = dict(pair.split("=", 1) for pair in qr_text.split("&") if "=" in pair)
-            return {
-                "datetime": params.get("t", ""),
-                "sum": params.get("s", ""),
-                "fn": params.get("fn", ""),
-                "fd": params.get("i", ""),     # номер фискального документа
-                "fp": params.get("fp", ""),    # фискальный признак
-                "operation_type": params.get("n", ""),
-                "raw": qr_text
-            }
-        except:
-            pass
-    return {"raw": qr_text}
-
-# ====== Запись в Google Таблицу ======
-def add_row_to_sheet(data: dict):
-    """Добавляет строку с данными чека. Если лист пуст, вставляет заголовки."""
-    headers = ["Дата/время", "Сумма", "ФН", "ФД", "ФП", "Тип операции", "Сырой QR"]
-    existing = sheet.get_all_values()
-    if not existing or existing[0] != headers:
-        # Если лист не пуст и заголовки не совпадают – очищаем и добавляем правильные
-        if existing:
-            sheet.clear()
-        sheet.append_row(headers)
-
-    row = [
-        data.get("datetime", ""),
-        data.get("sum", ""),
-        data.get("fn", ""),
-        data.get("fd", ""),
-        data.get("fp", ""),
-        data.get("operation_type", ""),
-        data.get("raw", "")
-    ]
-    sheet.append_row(row)
-    logger.info("Данные успешно добавлены в таблицу.")
-
-# ====== Обработчики команд ======
+# --- Обработчики ---
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     await message.answer(
-        "👋 Пришлите фото с QR-кодом чека. "
-        "Я расшифрую данные и сохраню их в Google Таблицу."
+        "👋 Привет! Я бот для учёта чеков.\n"
+        "Отправьте мне JSON-файл из приложения «Проверка чека» (или другого), "
+        "и я разложу все позиции по вашей Google Таблице.\n"
+        "Перед сохранением спрошу категорию (счёт)."
     )
 
-# ====== Обработчик фото и файлов-изображений ======
-@dp.message(F.photo | F.document)
-async def handle_qr_image(message: Message):
-    # Определяем источник изображения
-    if message.photo:
-        file_id = message.photo[-1].file_id  # самое высокое разрешение
-    elif message.document:
-        doc = message.document
-        # Если это не изображение – предупреждаем
-        if doc.mime_type and not doc.mime_type.startswith("image/"):
-            return await message.answer("⚠️ Пожалуйста, отправьте изображение.")
-        file_id = doc.file_id
-    else:
-        return
+@dp.message(F.document)
+async def handle_json_file(message: Message, state: FSMContext):
+    doc = message.document
+    # Проверяем, что это JSON
+    if not (doc.file_name and doc.file_name.lower().endswith(".json")) and \
+       not (doc.mime_type and "json" in doc.mime_type):
+        return await message.answer("⚠️ Я принимаю только JSON-файлы с чеками.")
 
-    # Скачиваем файл из Telegram
+    # Скачиваем и парсим
     try:
-        file = await bot.get_file(file_id)
-        file_bytes_io = BytesIO()
-        await bot.download_file(file.file_path, file_bytes_io)
-        image_bytes = file_bytes_io.getvalue()
+        file = await bot.get_file(doc.file_id)
+        file_bytes = BytesIO()
+        await bot.download_file(file.file_path, file_bytes)
+        content = file_bytes.getvalue().decode("utf-8")
+        data = json.loads(content)
     except Exception as e:
-        logger.error(f"Ошибка скачивания файла: {e}")
-        return await message.answer("❌ Не удалось загрузить файл. Попробуйте ещё раз.")
+        logger.error(f"Ошибка чтения JSON: {e}")
+        return await message.answer("❌ Не удалось прочитать JSON-файл. Проверьте формат.")
 
-    # Распознаём QR
-    qr_text = decode_qr(image_bytes)
-    if not qr_text:
-        return await message.answer("❌ QR-код не найден. Убедитесь, что он чётко виден на фото.")
+    # Извлекаем позиции
+    items = parse_receipt_json(data)
+    if not items:
+        return await message.answer("❌ В чеке не найдено позиций (поле 'items').")
 
-    # Парсим данные
-    data = parse_receipt_qr(qr_text)
+    # Дата (из JSON или сегодня)
+    date_str = data.get("dateTime") or data.get("date") or datetime.now().strftime("%Y-%m-%d")
 
-    # Записываем в таблицу
+    # Сохраняем в состоянии
+    await state.update_data(items=items, date_str=date_str)
+    await message.answer(
+        f"📋 Чек от {date_str}, позиций: {len(items)}.\nВыберите категорию:",
+        reply_markup=accounts_keyboard
+    )
+    await state.set_state(Receipt.waiting_for_account)
+
+@dp.message(Receipt.waiting_for_account)
+async def process_account(message: Message, state: FSMContext):
+    account = message.text
+    # Убираем emoji для чистоты названия счёта (опционально)
+    for emoji in ["🥦 ", "🚌 ", "🍔 ", "🎉 ", "🏠 ", "💊 ", "📚 ", "🛒 "]:
+        account = account.replace(emoji, "")
+
+    data = await state.get_data()
+    items = data.get("items", [])
+    date_str = data.get("date_str", datetime.now().strftime("%Y-%m-%d"))
+
     try:
-        add_row_to_sheet(data)
+        write_items_to_sheet(date_str, account, items)
+        await message.answer(
+            f"✅ {len(items)} позиций сохранено в категорию «{account}».",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
     except Exception as e:
         logger.error(f"Ошибка записи в Google Sheets: {e}")
-        return await message.answer(
-            "⚠️ QR-код прочитан, но не удалось сохранить в таблицу. "
-            "Проверьте доступ и права сервисного аккаунта."
-        )
+        await message.answer("⚠️ Не удалось записать в таблицу. Попробуйте позже.")
 
-    # Формируем ответ пользователю
-    if "datetime" in data:
-        answer = (
-            f"✅ Чек добавлен!\n"
-            f"📅 Дата/время: {data['datetime']}\n"
-            f"💰 Сумма: {data['sum']} ₽\n"
-            f"🧾 ФН: {data['fn']}\n"
-            f"📄 ФД: {data['fd']}\n"
-            f"🔐 ФП: {data['fp']}"
-        )
-    else:
-        answer = (
-            f"✅ QR-код распознан, содержимое сохранено:\n"
-            f"<code>{data['raw']}</code>"
-        )
+    await state.clear()
 
-    await message.answer(answer, parse_mode="HTML")
-
-# ====== Запуск ======
+# --- Запуск ---
 async def main():
-    logger.info("Бот запущен...")
+    logger.info("Бот запущен (JSON-режим)...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
