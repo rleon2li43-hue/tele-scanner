@@ -2,19 +2,16 @@ import os
 import telebot
 import gspread
 import requests
+from datetime import datetime
 
-# Теперь и токен бота, и ссылка на таблицу полностью скрыты в секретах Amvera
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 SHEET_URL = os.environ.get("SHEET_URL")
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# Подключаемся к таблице напрямую по публичной ссылке из переменной окружения
-try:
-    gc = gspread.public()
-    SHEET = gc.open_by_url(SHEET_URL).sheet1
-except Exception as e:
-    print(f"Ошибка подключения к таблице: {e}")
+# Подключение к публичной таблице
+gc = gspread.Client()
+SHEET = gc.open_by_url(SHEET_URL).sheet1
 
 user_data = {}
 
@@ -38,40 +35,52 @@ def handle_qr_photo(message):
     bot.send_message(chat_id, "Загружаю и анализирую фото...")
 
     try:
-        # Получаем прямую ссылку на фото из Telegram (Строка 42-43)
+        # 1. Скачиваем фото
         file_info = bot.get_file(message.photo[-1].file_id)
-        file_url = f"https://telegram.org{BOT_TOKEN}/{file_info.file_path}"
-        
-        # Отправляем фото в бесплатное онлайн-API для чтения QR (Строка 45-47)
-        api_url = f"https://qrserver.com{file_url}"
-        response = requests.get(api_url).json()
-        
-        # Защита от сбоя ответа сервера (Строка 49-50)
-        if not response or not isinstance(response, list):
-            raise Exception("Не удалось связаться с сервером распознавания.")
-            
-        # Читаем текст из правильной структуры ответа API (Строка 52-53)
-        qr_text = response[0]['symbol'][0]['data']
+        file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info.file_path}"
+        photo_content = requests.get(file_url).content
 
-        
+        # 2. Отправляем в API для распознавания QR
+        api_url = "https://api.qrserver.com/v1/read-qr-code/"
+        files = {'file': photo_content}
+        response = requests.post(api_url, files=files)
+        if response.status_code != 200:
+            raise Exception("Сервер распознавания временно недоступен")
+
+        data = response.json()
+        if not data or not data[0].get('symbol'):
+            raise Exception("QR-код не найден. Попробуйте сфотографировать крупнее и чётче.")
+
+        qr_text = data[0]['symbol'][0]['data']
         if not qr_text:
-            raise Exception("Не удалось обнаружить QR-код на фото. Пожалуйста, сделайте более четкий снимок крупным планом.")
+            raise Exception("Не удалось прочитать QR-код.")
 
-        # Разбираем параметры строки чека
-        params = dict(x.split('=') for x in qr_text.split('&'))
-        raw_date = params.get('t', 'Неизвестно')
+        # 3. Парсим параметры
+        params = dict(x.split('=') for x in qr_text.split('&') if '=' in x)
+        raw_date = params.get('t', '')
         total_sum = params.get('s', '0')
         account = user_data[chat_id]['account']
 
-        if raw_date != 'Неизвестно':
-            date_formatted = f"{raw_date[6:8]}.{raw_date[4:6]}.{raw_date[:4]} {raw_date[9:11]}:{raw_date[11:13]}"
+        # 4. Форматируем дату
+        if raw_date:
+            try:
+                dt = datetime.strptime(raw_date, '%Y%m%dT%H%M%S')
+                date_formatted = dt.strftime('%d.%m.%Y %H:%M')
+            except ValueError:
+                date_formatted = raw_date
         else:
-            date_formatted = raw_date
+            date_formatted = "Неизвестно"
 
-        # Записываем данные в Google Таблицу по ссылке
-        SHEET.append_row([date_formatted, account, float(total_sum), qr_text])
+        # 5. Сумма
+        try:
+            total_sum_float = float(total_sum.replace(',', '.'))
+        except ValueError:
+            total_sum_float = 0.0
+
+        # 6. Запись в таблицу
+        SHEET.append_row([date_formatted, account, total_sum_float, qr_text])
+
         bot.send_message(chat_id, f"✅ Данные внесены!\n📅 Дата: {date_formatted}\n💳 Счет: {account}\n💰 Сумма: {total_sum} руб.")
-        
         del user_data[chat_id]
 
     except Exception as e:
